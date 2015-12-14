@@ -15,25 +15,29 @@ use {SendError, SendErrorReason};
 mod tests;
 
 enum ActorCellMessage<Message> {
-	Process(Message),
-	StopAndNotify
+    Process(Message),
+    StopAndNotify,
 }
 
 /// A simplistic environment to run an actor in
 /// which can act as ActorRef.
 ///
 /// Currently, it still uses one thread per actor.
-struct ActorCell<Message, A: Actor<Message>> {
-	// TODO: clone sender instead of mutex
-	tx: Mutex<Sender<ActorCellMessage<Message>>>,
-	actor: Mutex<Option<A>>
+struct ActorCell<Message: Send, A: Actor<Message>> {
+    // TODO: clone sender instead of mutex
+    tx: Mutex<Sender<ActorCellMessage<Message>>>,
+    actor: Mutex<Option<A>>,
 }
 
-impl<Message, A: Actor<Message>> Drop for ActorCell<Message, A> {
-	fn drop(&mut self) {
-		// FIXME: Is it clever that we might panic in Drop?
-		self.tx.lock().unwrap().send(ActorCellMessage::StopAndNotify).unwrap();
-	}
+impl<Message: Send, A: Actor<Message>> Drop for ActorCell<Message, A> {
+    fn drop(&mut self) {
+        if let Ok(act) = self.tx.lock() {
+            match act.send(ActorCellMessage::StopAndNotify) {
+                Ok(actor) => actor,
+                Err(_) => debug!("unable to stop thread"),
+            }
+        }
+    }
 }
 
 /// An ActorSpawner which spawns a dedicated thread for every
@@ -41,61 +45,60 @@ impl<Message, A: Actor<Message>> Drop for ActorCell<Message, A> {
 pub struct DedicatedThreadSpawner;
 
 impl ActorSpawner for DedicatedThreadSpawner {
-	/// Create and ActorCell for the given actor.
-	fn spawn<Message, A>(&self, actor: A) -> Arc<ActorRef<Message>>
-		where Message: Send + 'static, A: Actor<Message> + 'static
-	{
-		let (tx, rx) = channel();
+    /// Create and ActorCell for the given actor.
+    fn spawn<Message, A>(&self, actor: A) -> Arc<ActorRef<Message>>
+        where Message: Send + 'static,
+              A: Actor<Message> + 'static
+    {
+        let (tx, rx) = channel();
 
-		let actor_lock = Mutex::new(Some(actor));
+        let actor_lock = Mutex::new(Some(actor));
 
-		let ret_cell = Arc::new(ActorCell {
-			tx: Mutex::new(tx), 
-			actor: actor_lock
-		});
+        let ret_cell = Arc::new(ActorCell {
+            tx: Mutex::new(tx),
+            actor: actor_lock,
+        });
 
-		let cell = ret_cell.clone();
+        let cell = ret_cell.clone();
 
-		thread::spawn( move|| {
-			let mut actor = cell.actor.lock().unwrap().take().unwrap();
+        thread::spawn(move || {
+            let mut actor = cell.actor.lock().unwrap().take().unwrap();
+            while let ActorCellMessage::Process(msg) = rx.recv().unwrap() {
+                actor.process(msg);
+            }
 
-			loop {
-				match rx.recv().unwrap() {
-					ActorCellMessage::Process(msg) => {
-						actor.process(msg);
-					},
-					ActorCellMessage::StopAndNotify => {
-						break;
-					},
-				}
-			}
-		});
+        });
 
-		ret_cell
-	}	
+        ret_cell
+    }
 }
 
 impl<Message> From<mpsc::SendError<Message>> for SendError<Message> {
-	fn from(err: mpsc::SendError<Message>) -> SendError<Message> {
-		match err {
-			mpsc::SendError(message) => SendError(SendErrorReason::Unreachable, message)
-		}
-	}
+    fn from(err: mpsc::SendError<Message>) -> SendError<Message> {
+        match err {
+            mpsc::SendError(message) => SendError(SendErrorReason::Unreachable, message),
+        }
+    }
 }
 
-impl<Message: Send + 'static, A: 'static + Actor<Message>> ActorRef<Message> for ActorCell<Message, A> {
-	fn send(&self, msg: Message) -> Result<(), SendError<Message>> {
-		match self.tx.lock() {
-			Err(..) => 
-				Err(SendError(SendErrorReason::Unreachable, msg)),
-			Ok(tx) =>
-				tx.send(ActorCellMessage::Process(msg)).map_err({|err| 
-					match err {
-						mpsc::SendError(ActorCellMessage::Process(msg)) => 
-							SendError(SendErrorReason::Unreachable, msg),
-						_ => unreachable!()
-					}
-				}),
-		}
-	}
+impl<Message: Send + 'static, A: 'static + Actor<Message>> ActorRef<Message> for ActorCell<Message,
+                                                                                           A>
+    {
+    fn send(&self, msg: Message) -> Result<(), SendError<Message>> {
+        match self.tx.lock() {
+            Err(..) => Err(SendError(SendErrorReason::Unreachable, msg)),
+            Ok(tx) => {
+                tx.send(ActorCellMessage::Process(msg)).map_err({
+                    |err| {
+                        match err {
+                            mpsc::SendError(ActorCellMessage::Process(msg)) => {
+                                SendError(SendErrorReason::Unreachable, msg)
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                })
+            }
+        }
+    }
 }

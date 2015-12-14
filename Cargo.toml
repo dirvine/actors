@@ -1,14 +1,16 @@
 [package]
-name = "actors"
-version = "0.2.0-SNAPSHOT"
 authors = ["Peter Kolloch <kolloch@web-app-evolution.com>"]
 description = "Provides actor-like concurrency for Rust"
 documentation = "https://kolloch.github.io/actors/doc/actors/index.html"
 homepage = "https://github.com/kolloch/actors"
-repository = "https://github.com/kolloch/actors"
-readme = "README.md"
 keywords = ["actor", "concurrency", "threads", "synchronization"]
 license = "BSD-3-Clause"
+name = "actors"
+readme = "README.md"
+repository = "https://github.com/kolloch/actors"
+version = "0.2.0-SNAPSHOT"
 
 [dependencies]
+clippy = "0.0.30"
+log = "0.3.4"
 threadpool = "0.1"
